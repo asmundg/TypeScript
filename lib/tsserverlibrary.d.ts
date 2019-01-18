@@ -2491,6 +2491,7 @@ declare namespace ts {
         jsxFactory?: string;
         composite?: boolean;
         removeComments?: boolean;
+        resolutionPlatforms?: string[];
         rootDir?: string;
         rootDirs?: string[];
         skipLibCheck?: boolean;
