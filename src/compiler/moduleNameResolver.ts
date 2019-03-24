@@ -1,4 +1,6 @@
 namespace ts {
+    declare const console: any
+
     /* @internal */
     export function trace(host: ModuleResolutionHost, message: DiagnosticMessage, ...args: any[]): void;
     export function trace(host: ModuleResolutionHost): void {
@@ -902,7 +904,13 @@ namespace ts {
                 if (traceEnabled) {
                     trace(host, Diagnostics.Loading_module_0_from_node_modules_folder_target_file_type_1, moduleName, Extensions[extensions]);
                 }
-                const resolved = loadModuleFromNearestNodeModulesDirectory(extensions, moduleName, containingDirectory, state, cache, redirectedReference);
+
+                let resolved = tryPnp(moduleName, containingDirectory, extensions)
+
+                if (!resolved) {
+                    resolved = loadModuleFromNearestNodeModulesDirectory(extensions, moduleName, containingDirectory, state, cache, redirectedReference);
+                }
+
                 if (!resolved) return undefined;
 
                 let resolvedValue = resolved.value;
@@ -919,6 +927,61 @@ namespace ts {
                 const resolved = nodeLoadModuleByRelativeName(extensions, candidate, /*onlyRecordFailures*/ false, state, /*considerPackageJson*/ true);
                 // Treat explicit "node_modules" import as an external library import.
                 return resolved && toSearchResult({ resolved, isExternalLibraryImport: contains(parts, "node_modules") });
+            }
+        }
+    }
+
+    function tryPnp(moduleName: string, containingDirectory: string, extensions: Extensions[]): SearchResult<{ resolved: Resolved, isExternalLibraryImport: boolean }> {
+        let pnp: any
+        try {
+            eval("pnp = require('pnpapi')")
+            console.warn("in pnp")
+        } catch {
+            // No pnp support
+            return
+        }
+
+        const [,, packageName = ``, rest] = moduleName.match(/^(!(?:.*!)+)?((?!\.{0,2}\/)(?:@[^\/]+\/)?[^\/]+)?(.*)/)!;
+
+        // First we try the resolution on "@types/package-name" starting from the project root
+        if (packageName) {
+            const typesPackagePath = `@types/${packageName.replace(/\//g, `__`)}${rest}`;
+
+            let unqualified = "";
+            try {
+                console.warn(`looking for ${typesPackagePath} ${containingDirectory}`)
+                unqualified = pnp.resolveToUnqualified(typesPackagePath, containingDirectory);
+                console.warn(`${unqualified}`)
+            } catch {}
+
+            if (unqualified) {
+                console.warn(`Looking for ${extensions}, ${unqualified}, ${containingDirectory}, ${loader}, ${state}`)
+                const result = tryLoadModuleUsingOptionalResolutionSettings(extensions, unqualified, containingDirectory, loader, state);;
+                console.warn(`${result}`)
+                if (result) {
+                    return {value: result}
+                }
+            }
+        }
+
+        if (!resolved) {
+            // Then we try on "package-name", this time starting from the package that makes the request
+            const regularPackagePath = `${packageName || ``}${rest}`;
+
+            let unqualified = "";
+            try {
+                console.warn(`looking for ${regularPackagePath} ${containingDirectory}`)
+                unqualified = pnp.resolveToUnqualified(regularPackagePath, containingDirectory);
+                console.warn(`${unqualified}`)
+            } catch {}
+
+            if (unqualified) {
+                console.warn(`Looking for ${extensions}, ${unqualified}, ${containingDirectory}, ${loader}, ${state}`)
+                const result = tryLoadModuleUsingOptionalResolutionSettings(extensions, unqualified, containingDirectory, loader, state);;
+                console.warn(`${result}`)
+                if (result) {
+                    return {value: result}
+                }
             }
         }
     }
@@ -1097,7 +1160,7 @@ namespace ts {
         return tryFileInner("");
 
         function tryFileInner(platform: string): string | undefined {
-            
+
             let fileName = file;
             if (platform) {
               let lastDot = file.lastIndexOf('.');
