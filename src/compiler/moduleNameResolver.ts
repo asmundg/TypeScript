@@ -295,8 +295,19 @@ namespace ts {
             }
         }
 
-        let resolved = primaryLookup();
+
+
+        let resolved: PathAndPackageId | undefined
+
+        if (containingFile) {
+            const result = tryPnp(typeReferenceDirectiveName, containingFile, Extensions.DtsOnly, moduleResolutionState)
+            resolved = result && result.value && { fileName: result.value.path, packageId: result.value.packageId };
+        }
+
         let primary = true;
+        if (!resolved) {
+            resolved = primaryLookup();
+        }
         if (!resolved) {
             resolved = secondaryLookup();
             primary = false;
@@ -902,7 +913,13 @@ namespace ts {
                 if (traceEnabled) {
                     trace(host, Diagnostics.Loading_module_0_from_node_modules_folder_target_file_type_1, moduleName, Extensions[extensions]);
                 }
-                const resolved = loadModuleFromNearestNodeModulesDirectory(extensions, moduleName, containingDirectory, state, cache, redirectedReference);
+
+                let resolved = tryPnp(moduleName, containingDirectory, extensions, state)
+
+                if (!resolved) {
+                    resolved = loadModuleFromNearestNodeModulesDirectory(extensions, moduleName, containingDirectory, state, cache, redirectedReference);
+                }
+
                 if (!resolved) return undefined;
 
                 let resolvedValue = resolved.value;
@@ -921,6 +938,57 @@ namespace ts {
                 return resolved && toSearchResult({ resolved, isExternalLibraryImport: contains(parts, "node_modules") });
             }
         }
+    }
+
+    function tryPnp(moduleName: string, containingDirectory: string, extensions: Extensions, state: ModuleResolutionState): SearchResult<Resolved> {
+        // Convenience toggle for logging internals
+        const DEBUG = state.compilerOptions.traceResolution
+
+        let pnp: any
+        try {
+            eval("pnp = require('pnpapi')")
+        } catch {
+            // No pnp support
+            return
+        }
+
+        const [,, packageName = ``, rest] = moduleName.match(/^(!(?:.*!)+)?((?!\.{0,2}\/)(?:@[^\/]+\/)?[^\/]+)?(.*)/)!;
+        // First we try the resolution on "@types/package-name"
+        const typesPackagePath = `@types/${packageName.replace(/\//g, `__`)}${rest}`;
+        // Then we try on "package-name", this time starting from the package that makes the request
+        const regularPackagePath = `${packageName || ``}${rest}`;
+
+        // In case we're resolving from a directory and not a
+        // file, try again with a trailing slash because PNP
+        // is picky.
+        const lookups = [{path: typesPackagePath, containingDirectory},
+                         {path: typesPackagePath, containingDirectory: containingDirectory + "/"},
+                         {path: regularPackagePath, containingDirectory},
+                         {path: regularPackagePath, containingDirectory: containingDirectory + "/"}];
+
+        DEBUG && console.warn(`PNP resolving ${moduleName} @ ${containingDirectory} (${packageName})`);
+        let unqualified = "";
+        for (const lookup of lookups) {
+            try {
+                unqualified = pnp.resolveToUnqualified(lookup.path, lookup.containingDirectory);
+            } catch {}
+            if (unqualified) {
+                break;
+            }
+        }
+
+        if (unqualified) {
+            // Not really a node_modules directory, but this function
+            // contains the correct logic for parsing either
+            // package.jsons or specific files..
+            const result = loadModuleFromSpecificNodeModulesDirectory(extensions, getBaseFileName(moduleName), getDirectoryPath(unqualified), true, state)
+            if (result) {
+                DEBUG && console.warn(`    Found ${moduleName} @ ${containingDirectory} to ${result.path}`)
+                return {value: result}
+            }
+        }
+
+        DEBUG && console.warn("   Failed")
     }
 
     function realPath(path: string, host: ModuleResolutionHost, traceEnabled: boolean): string {
@@ -1097,7 +1165,7 @@ namespace ts {
         return tryFileInner("");
 
         function tryFileInner(platform: string): string | undefined {
-            
+
             let fileName = file;
             if (platform) {
               let lastDot = file.lastIndexOf('.');
